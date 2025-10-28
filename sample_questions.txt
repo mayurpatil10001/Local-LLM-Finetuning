@@ -1,0 +1,5 @@
+What is artificial intelligence?
+How does machine learning work?
+What is the difference between AI and ML?
+Explain neural networks in simple terms.
+What is deep learning?
