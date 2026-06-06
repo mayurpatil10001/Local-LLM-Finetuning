@@ -1,4 +1,4 @@
-# Local LLM Training Guide for HP Victus Laptop
+# Local LLM Training 
 
 ## 🚀 Quick Start
 
