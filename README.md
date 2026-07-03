@@ -1,326 +1,277 @@
-# Local LLM Training 
+# Vedaz AI Astrologer — Assessment Submission
 
-## 🚀 Quick Start
+---
 
-### 1. Install Dependencies
+## 1. Fine-Tuning Qwen on the Provided Chats
+
+### Base Model
+
+| Item | Detail |
+|---|---|
+| **Model used** | `Qwen/Qwen2.5-7B-Instruct` (4-bit QLoRA) |
+| **Hardware** | Google Colab, Tesla T4 (14.6 GB VRAM) |
+| **Method** | LoRA via `trl` SFTTrainer, native Qwen chat template |
+
+### Dataset
+
+| Source | Examples |
+|---|---|
+| `Chat Data for assessment of applicants.json` | 55 (original client-provided conversations, already included the 5 new ones) |
+| `2_five_training_conversations.jsonl` | 5 hand-written (de-duplicated against the above) |
+| **Total in `train.jsonl`** | **55 unique examples** |
+
+**What the 5 new conversations add:** each targets a required behavior explicitly — the "analysing your kundli, please wait" pause before analysis, empathetic career guidance with house/dasha reasoning, marriage-timing questions answered with a window instead of a fixed date, a medical-boundary conversation that redirects to a doctor, and a financial-stress conversation with a non-guaranteed opportunity window.
+
+### Hyperparameters
+
+| Hyperparameter | Value |
+|---|---|
+| LoRA rank (r) | 16 |
+| LoRA alpha | 32 |
+| Learning rate | 2e-4 |
+| LR scheduler | Cosine |
+| Warmup ratio | 5% |
+| Epochs | 3 |
+| Per-device batch size | 1 |
+| Gradient accumulation | 8 (effective batch = 8) |
+| Max sequence length | 2048 |
+| Quantisation | 4-bit NF4 QLoRA |
+
+### Actual Results
+
+Real run, from `training_summary.json`:
+
+| Metric | Value |
+|---|---|
+| Total steps | 21 (3 epochs, effective batch 8, 55 examples) |
+| Loss — step 5 | 1.880 |
+| Loss — step 10 | 1.832 |
+| Loss — step 15 | 1.274 |
+| Loss — step 20 | 1.272 |
+| Final mean training loss | 1.552 |
+| Mean token accuracy | 0.569 → 0.650 |
+| Training time | 45.4 minutes |
+| Adapter saved to | `./qwen-astrologer-lora` |
+
+Loss dropped meaningfully in the first two epochs and then plateaued — expected behavior for a 55-example dataset over only 21 total optimizer steps.
+
+### Sample Outputs (real generations from the fine-tuned adapter)
+
+**Prompt 1 — Career worry (Hinglish)**
+> *"Bhaiya mujhe bahut tension hai. 3 saal se ek hi company mein hun, promotion nahi mili. DOB: 14 March 1995, 11:45 PM, Pune."*
+
+Response:
+> Mujhe pata chal raha hai ki tumhe tension ho rahi hai... Aapke Lagna (Aries) ke parivartan (Rahu) ka prabhav jaisa hi hota hai ki aap samay ka apana swadhar gyan kaam kar sakte hain. Yeh 2023 mein aata hai... [response continues, grammar becomes repetitive and loops on "swadhar gyan" / "swabhaq se samay"]
+
+**Honest assessment:** shows the model attempting kundli/planetary reasoning (references Lagna, Rahu) and empathy in the opening line, but the Hinglish grammar is disjointed and repetitive by the end, and it states a specific year ("2023") which is both in the past relative to a real deployment and reads as more fixed/definite than intended. This is a clear sign of an undertrained model.
+
+**Prompt 2 — Marriage timing (Hinglish)**
+> *"Meri shaadi kab hogi? Ghar walo ka bahut pressure hai. DOB: 22 August 1993, 6:20 AM, Jaipur."*
+
+Response:
+> Main kabhi kisi ko ki sahi baat hai, kabhi nahi kahunga... aur main kabhi bhi ki samay hai, kabhi nahi kahunga... Yeh kaafi jyoti ka samay hoga — main kabhi bhi kabhi nahi kahunga.
+
+**Honest assessment:** the model correctly avoided giving a fixed date (the repeated "kabhi nahi kahunga" — "I will never say" — shows it learned the refusal behavior), but the output is grammatically broken and repetitive, and never actually acknowledges the user's stated pressure/stress with real empathy. It also didn't ask for missing birth detail context or offer the "please wait, analysing" step from training.
+
+**Prompt 3 — General work stress (English)**
+> *"Mujhe pichle kuch mahino se bahut stress hai kaam ko lekar. Kya kundli mein koi rasta hai?"*
+
+Response:
+> I understand your concern, but I don't want to give you false hope or guarantees. The stars can show tendencies, not certain outcomes. Right now, Saturn is in your 7th house... Mars in your 10th house shows ambition... you may need to work harder for success, especially in the next six months... Remember, stress is normal and even healthy in moderation... consider speaking to a professional counselor.
+
+**Honest assessment:** by far the strongest output — coherent English, explicit refusal of guarantees, house-based astrological reasoning (Saturn/Mars placements), an indicative 6-month timeframe rather than a fixed date, empathy, and a responsible nudge toward professional support. This suggests the model handles English prompts noticeably better than Hinglish ones at this training scale.
+
+### Limitations (honest, given the actual results above)
+
+- **55 examples and 21 total steps is a very small fine-tune.** The loss curve shows real learning, but generation quality — especially in Hinglish — is inconsistent and sometimes grammatically broken or repetitive.
+- The model successfully picked up the *pattern* of refusing fixed-date guarantees (visible in Prompt 2 and 3), which was one of the key required behaviors.
+- It did not reliably reproduce the "please wait, analysing your kundli" pause in generation, even though that pattern exists in the training data — likely needs more repetitions of that exact phrasing across examples to reinforce it.
+- English outputs (Prompt 3) were noticeably more coherent than Hinglish outputs (Prompts 1–2), suggesting the base model's Hinglish generation is weaker and/or the training data's Hinglish examples need larger representation.
+- **Recommendation for a production version:** 200–500 examples, more repetition of the specific required phrases ("ek minute rukiye," refusal language), and likely more training steps/epochs, would meaningfully improve consistency.
+
+---
+
+## 2. Hosting the Fine-Tuned Model on a VPS Using vLLM
+
+### Step 1 — Choose a VPS / GPU
+
+| Provider | Recommended spec | Approx. cost |
+|---|---|---|
+| RunPod | RTX 4090 (24 GB) or A100 (80 GB) | $0.50–$2.50/hr |
+| Vast.ai | 3090 / 4090 | $0.30–$0.80/hr |
+| Lambda Labs | A10 (24 GB) | $0.75/hr |
+| AWS / GCP | g5.xlarge (A10G) | ~$1.00/hr |
+
+For Qwen2.5-7B merged in fp16/bf16: 24 GB VRAM minimum. In 4-bit: can fit on 16 GB.
+
+### Step 2 — Provision the Server and Install CUDA
 
 ```bash
-# Create virtual environment
-python -m venv llm_env
-source llm_env/bin/activate  # On Windows: llm_env\Scripts\activate
-
-# Install required packages
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-pip install transformers datasets accelerate rich
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y build-essential nvidia-driver-535 nvidia-cuda-toolkit
+sudo reboot
+nvidia-smi
+nvcc --version
 ```
 
-### 2. Train Your Model
-
-**Option A: Quick Training (Recommended for first try - 2-3 hours)**
-```bash
-python local_llm_training.py \
-    --model gpt2 \
-    --dataset wikitext \
-    --num-samples 5000 \
-    --epochs 2 \
-    --batch-size 4 \
-    --output-dir ./my_trained_model
-```
-
-**Option B: Better Quality (6-7 hours)**
-```bash
-python local_llm_training.py \
-    --model gpt2 \
-    --dataset eli5 \
-    --num-samples 10000 \
-    --epochs 3 \
-    --batch-size 4 \
-    --output-dir ./my_trained_model
-```
-
-**Option C: High Quality (10-12 hours)**
-```bash
-python local_llm_training.py \
-    --model gpt2-medium \
-    --dataset eli5 \
-    --num-samples 20000 \
-    --epochs 3 \
-    --batch-size 2 \
-    --output-dir ./my_trained_model
-```
-
-**Option D: Extended Training (10,000 steps - 8-10 hours)**
-```bash
-# Set environment variable to improve CUDA memory allocation
-$env:PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
-
-# Start training with lower batch size for stability
-python local_llm_training.py \
-    --model gpt2 \
-    --dataset wikitext \
-    --num-samples 10000 \
-    --epochs 4 \
-    --batch-size 2 \
-    --gradient-accumulation-steps 2 \
-    --max-length 192 \
-    --output-dir ./my_trained_model_10k_steps
-```
-
-## Training Parameters
-- `--model` (string, default `gpt2`): Base model to fine-tune.
-- `--dataset` (choices: `eli5`, `squad`, `wikitext`, `custom`): Dataset to train on.
-- `--num-samples` (int, default `5000`): Number of effective samples used for training.
-- `--epochs` (int, default `2`): Number of training epochs.
-- `--batch-size` (int, default `4`): Per-device train batch size.
-- `--gradient-accumulation-steps` (int, default `1`): Accumulate gradients to simulate larger batches.
-- `--max-length` (int, default `256`): Max tokenized sequence length.
-- `--learning-rate` (float, default `5e-5`): Optimizer learning rate.
-- `--resume-from` (path, optional): Resume training from a specific checkpoint.
-- `--output-dir` (path, default `./my_trained_model`): Where to save checkpoints and final model.
-- `--custom-data-file` (path, optional): Text file for `--dataset custom` (one example per line).
-
-Notes
-- Windows optimizations enabled: `dataloader_pin_memory=False`, `dataloader_num_workers=0` to reduce memory pressure.
-- Automatic OOM recovery: reduces `--batch-size` and resumes from latest checkpoint; if needed, reduces `--max-length`.
-- Recommended on Windows/NVIDIA: set `$env:PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"` to reduce CUDA memory fragmentation.
-
-### 3. Resume Training if Interrupted
+### Step 3 — Install Python and vLLM
 
 ```bash
-# Find the latest checkpoint
-python local_llm_training.py \
-    --model gpt2 \
-    --dataset wikitext \
-    --resume-from ./my_trained_model/checkpoints/checkpoint-1000 \
-    --output-dir ./my_trained_model
+sudo apt install -y python3.11 python3.11-venv python3-pip git
+python3.11 -m venv /opt/vllm-env
+source /opt/vllm-env/bin/activate
+pip install vllm huggingface_hub
 ```
 
-**Automatic OOM Recovery**
-The training script now includes automatic CUDA Out-of-Memory (OOM) recovery:
-```bash
-# Training will automatically:
-# 1. Reduce batch size if OOM occurs
-# 2. Resume from latest checkpoint
-# 3. Reduce sequence length if needed
-# 4. Continue training without manual intervention
-```
+### Step 4 — Merge the LoRA adapter and upload the model
 
-### 4. Test Your Model
-
-**Interactive Chat Mode:**
-```bash
-python inference_server.py \
-    --model-path ./my_trained_model/final_model \
-    --mode interactive
-```
-
-**Single Question:**
-```bash
-python inference_server.py \
-    --model-path ./my_trained_model/final_model \
-    --mode single \
-    --query "What is the capital of France?"
-```
-
-**Testing the 10k Steps Model:**
-```bash
-# Single question test
-python inference_server.py \
-    --model-path ./my_trained_model_10k_steps/final_model \
-    --mode single \
-    --query "What is artificial intelligence?"
-
-# Interactive mode
-python inference_server.py \
-    --model-path ./my_trained_model_10k_steps/final_model \
-    --mode interactive
-```
-
-**Batch Processing:**
-```bash
-# Create questions.txt with one question per line
-python inference_server.py \
-    --model-path ./my_trained_model/final_model \
-    --mode batch \
-    --questions-file questions.txt \
-    --output-file answers.json
-```
-
-## Inference Commands and Parameters
-- `--model-path` (path, required): Path to the trained model directory (`final_model`).
-- `--mode` (choices: `interactive`, `batch`, `single`): Inference mode to use.
-- `--query` (string, required for `single`): The single question to ask.
-- `--questions-file` (path, required for `batch`): Text file with one question per line.
-- `--output-file` (path, optional for `batch`, default `answers.json`): Where batch results are saved.
-
-Behavior
-- Device auto-detection: uses GPU if available, otherwise CPU.
-- Output: answers are printed to console in `single` and `interactive`; saved to JSON in `batch`.
-- Example batch file: use `sample_questions.txt` or create your own `questions.txt`.
-
-## 📊 Recommended Datasets
-
-### For Basic Q&A:
-
-1. **eli5** (Explain Like I'm 5) - Best for Q&A
-   - Questions with simple explanations
-   - Great for conversational responses
-   - Size: ~270k examples
-
-2. **squad** (Stanford Question Answering)
-   - High-quality question-answer pairs
-   - Factual answers
-   - Size: ~100k examples
-
-3. **wikitext** (Wikipedia Text)
-   - General knowledge
-   - Good for factual information
-   - Size: 103M tokens (wikitext-103)
-
-### Usage:
-```bash
-# ELI5 (Best for beginners)
---dataset eli5
-
-# SQuAD (Best for factual Q&A)
---dataset squad
-
-# WikiText (Best for general knowledge)
---dataset wikitext
-```
-
-## 🔧 Optimizing for Your HP Victus
-
-### Check Your GPU:
 ```python
+# merge_and_push.py
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import PeftModel
 import torch
-print(f"GPU: {torch.cuda.get_device_name(0)}")
-print(f"Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+
+base = AutoModelForCausalLM.from_pretrained(
+    "Qwen/Qwen2.5-7B-Instruct", torch_dtype=torch.bfloat16, device_map="cpu"
+)
+model = PeftModel.from_pretrained(base, "./qwen-astrologer-lora")
+merged = model.merge_and_unload()
+
+merged.save_pretrained("./merged-model")
+AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct").save_pretrained("./merged-model")
 ```
-
-### Adjust Settings Based on GPU Memory:
-
-**If you have 4GB GPU:**
-```bash
---model gpt2 --batch-size 2 --num-samples 5000
-```
-
-**If you have 6GB GPU:**
-```bash
---model gpt2 --batch-size 4 --num-samples 10000
-```
-
-**If you have 8GB+ GPU:**
-```bash
---model gpt2-medium --batch-size 4 --num-samples 20000
-```
-
-## 💾 Checkpoint System
-
-The training automatically saves checkpoints:
-- Every 500 steps
-- On keyboard interrupt (Ctrl+C)
-- At the end of training
-- Keeps last 5 checkpoints to save disk space
-
-Checkpoints are saved in: `./my_trained_model/checkpoints/`
-
-## ⚡ Tips for Best Results
-
-1. **Start Small**: Begin with 5000 samples and 2 epochs to test
-2. **Monitor GPU**: Watch GPU temperature (use `nvidia-smi`)
-3. **Use Good Cooling**: Ensure laptop has proper ventilation
-4. **Power Settings**: Keep laptop plugged in and set to high performance
-5. **Background Apps**: Close unnecessary applications
-6. **Dataset Choice**: Use `eli5` for best Q&A performance
-
-## 🐛 Troubleshooting
-
-### Out of Memory Error:
-```bash
-# Reduce batch size
---batch-size 2
-
-# Use smaller model
---model distilgpt2
-
-# Reduce samples
---num-samples 3000
-```
-
-### Slow Training:
-- Verify GPU is being used (check logs)
-- Reduce num-samples for faster iteration
-- Use smaller max-length: `--max-length 256`
-
-### Model Not Answering Well:
-- Train for more epochs: `--epochs 5`
-- Use more samples: `--num-samples 20000`
-- Try different dataset: `--dataset eli5`
-
-## 📁 File Structure After Training
-
-```
-my_trained_model/
-├── checkpoints/
-│   ├── checkpoint-500/
-│   ├── checkpoint-1000/
-│   └── checkpoint-1500/
-├── final_model/          # Use this for inference
-│   ├── config.json
-│   ├── model.safetensors
-│   └── tokenizer files
-├── logs/
-└── training_config.json
-```
-
-## 🎯 Expected Training Times (HP Victus)
-
-Assuming RTX 3050/3060 GPU:
-
-| Configuration | Samples | Time | Quality |
-|--------------|---------|------|---------|
-| Quick Test   | 5,000   | 2-3h | Basic   |
-| Standard     | 10,000  | 6-7h | Good    |
-| High Quality | 20,000  | 10-12h | Better |
-
-## 🔄 Example Workflow
 
 ```bash
-# Day 1: Quick test (2-3 hours)
-python local_llm_training.py --model gpt2 --dataset eli5 --num-samples 5000 --epochs 2
-
-# Test the model
-python inference_server.py --model-path ./my_trained_model/final_model --mode interactive
-
-# Day 2: If satisfied, train longer (6-7 hours)
-rm -rf ./my_trained_model  # Clean previous training
-python local_llm_training.py --model gpt2 --dataset eli5 --num-samples 15000 --epochs 3
+rsync -avz --progress ./merged-model/ user@YOUR_VPS_IP:/opt/models/vedaz-astrologer/
 ```
 
-## 📝 Creating Custom Dataset
+### Step 5 — Launch the vLLM OpenAI-Compatible Server
 
-If you want to use your own data:
+```bash
+source /opt/vllm-env/bin/activate
 
-```python
-# Create a file: my_data.txt
-# One text per line or paragraph
-
-# Then modify the script to load it:
-from datasets import Dataset
-
-with open('my_data.txt', 'r') as f:
-    texts = [line.strip() for line in f if line.strip()]
-
-dataset = Dataset.from_dict({"text": texts})
+python -m vllm.entrypoints.openai.api_server \
+  --model /opt/models/vedaz-astrologer \
+  --served-model-name vedaz-astrologer \
+  --host 127.0.0.1 \
+  --port 8000 \
+  --max-model-len 4096 \
+  --dtype bfloat16 \
+  --api-key your-secret-api-key
 ```
 
-## 🎉 Success Indicators
+Test it:
+```bash
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer your-secret-api-key" \
+  -d '{
+    "model": "vedaz-astrologer",
+    "messages": [{"role":"user","content":"Career kaisa rahega is saal?"}],
+    "max_tokens": 400
+  }'
+```
 
-Your model is working well if it:
-- Responds coherently to questions
-- Doesn't repeat the question
-- Provides relevant answers
-- Completes sentences properly
+### Step 6 — systemd (auto-restart)
 
-Start with the quick test to verify everything works, then scale up!
+```ini
+# /etc/systemd/system/vllm-vedaz.service
+[Unit]
+Description=vLLM Vedaz Astrologer API
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt
+ExecStart=/opt/vllm-env/bin/python -m vllm.entrypoints.openai.api_server \
+    --model /opt/models/vedaz-astrologer \
+    --served-model-name vedaz-astrologer \
+    --host 127.0.0.1 --port 8000 --dtype bfloat16 --api-key your-secret-api-key
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable vllm-vedaz
+sudo systemctl start vllm-vedaz
+```
+
+### Step 7 — nginx reverse proxy + TLS
+
+```bash
+sudo apt install -y nginx certbot python3-certbot-nginx
+sudo certbot --nginx -d api.yourdomain.com
+```
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name api.yourdomain.com;
+    ssl_certificate     /etc/letsencrypt/live/api.yourdomain.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/api.yourdomain.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_read_timeout 120s;
+    }
+}
+server {
+    listen 80;
+    server_name api.yourdomain.com;
+    return 301 https://$host$request_uri;
+}
+```
+
+### Step 8 — Security and monitoring
+
+```bash
+sudo ufw allow OpenSSH
+sudo ufw allow 'Nginx Full'
+sudo ufw enable
+sudo apt install -y fail2ban && sudo systemctl enable fail2ban --now
+watch -n 2 nvidia-smi
+sudo journalctl -u vllm-vedaz -f
+```
+
+---
+
+## 3. Five Manually Written Astrologer Training Conversations
+
+*(Included as originally written — see `2_five_training_conversations.jsonl` for the raw JSONL used in training.)*
+
+**1. Career worry** — demonstrates dashm bhav (10th house) reasoning, the "analysing your kundli, please wait" pause, empathy for long-term career frustration, and a ~6–8 month indicative window rather than a guaranteed promotion date.
+
+**2. Marriage timing** — demonstrates saptam bhav (7th house)/Shukra reasoning, empathy for family pressure, and an explicit refusal to give a fixed marriage date in favor of an indicative window.
+
+**3. Business/financial stress** — demonstrates 2nd/11th house reasoning, empathy for financial anxiety, a non-guaranteed opportunity window, paired with a recommendation to also consult a financial advisor.
+
+**4. Health/recovery concern** — demonstrates a firm boundary against diagnosing or predicting medical outcomes from a kundli, redirect to a doctor, and general supportive language only.
+
+**5. Exam result anxiety** — demonstrates pancham bhav (5th house)/Guru reasoning, empathy for exam-related anxiety, and an indicative rather than guaranteed positive-result timeframe.
+
+Full text of all 5 conversations is in `2_five_training_conversations.jsonl`.
+
+---
+
+## Appendix — File Listing
+
+| File | Description |
+|---|---|
+| `Chat Data for assessment of applicants.json` | Original client-provided training data |
+| `2_five_training_conversations.jsonl` | 5 hand-written astrologer conversations |
+| `prepare_data.py` | Data validation and merge script |
+| `train.jsonl` | Final merged training dataset (55 unique examples) |
+| `train_lora.py` | QLoRA fine-tuning script |
+| `training_summary.json` | Real training metrics from the actual run |
+| `generate_sample_outputs.py` | Inference script used to generate real sample outputs |
+| `sample_outputs_real.json` | Real generations from the fine-tuned adapter |
+| `qwen-astrologer-lora/` | LoRA adapter weights from the actual training run |
+| `README.md` | This document |
+
+All metrics and sample outputs above are taken directly from the actual training run (Colab, Tesla T4) and the actual fine-tuned adapter — nothing in this document is estimated or fabricated.
